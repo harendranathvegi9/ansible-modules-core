@@ -273,10 +273,18 @@ def main():
                                                     iam.get_all_server_certs().\
                                                     list_server_certificates_result.\
                                                     server_certificate_metadata_list]
-    orig_bodies = [iam.get_server_certificate(thing).\
-                  get_server_certificate_result.\
-                  certificate_body \
-                  for thing in orig_certs]
+    orig_bodies = []
+    for thing in orig_certs:
+        try:
+            orig_bodies.append(iam.get_server_certificate(thing).\
+                               get_server_certificate_result.\
+                               certificate_body)
+        except boto.exception.BotoServerError, err:
+            if err.status == 404 and err.code == 'NoSuchEntity':
+                continue
+            else:
+                module.fail_json(msg=str(err))
+
     if new_name == name:
         new_name = None
     if new_path == path:
