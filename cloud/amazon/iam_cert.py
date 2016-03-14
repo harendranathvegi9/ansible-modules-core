@@ -102,8 +102,8 @@ tasks:
     cert_chain: myverytrustedchain
 
 '''
-import json
-import sys
+
+
 try:
     import boto
     import boto.iam
@@ -145,7 +145,7 @@ def cert_meta(iam, name):
                                                  expiration
     return opath, ocert, ocert_id, upload_date, exp
 
-def dup_check(module, iam, name, new_name, cert, orig_cert_names, orig_cert_bodies, dup_ok):
+def dup_check(module, name, new_name, cert, orig_cert_names, orig_cert_bodies, dup_ok):
     update=False
     if any(ct in orig_cert_names for ct in [name, new_name]):
         for i_name in [name, new_name]:
@@ -180,7 +180,7 @@ def dup_check(module, iam, name, new_name, cert, orig_cert_names, orig_cert_bodi
 def cert_action(module, iam, name, cpath, new_name, new_path, state,
                 cert, key, chain, orig_cert_names, orig_cert_bodies, dup_ok):
     if state == 'present':
-        update = dup_check(module, iam, name, new_name, cert, orig_cert_names,
+        update = dup_check(module, name, new_name, cert, orig_cert_names,
                            orig_cert_bodies, dup_ok)
         if update:
             opath, ocert, ocert_id, upload_date, exp = cert_meta(iam, name)
@@ -267,13 +267,29 @@ def main():
         if cert_chain is not None:
             cert_chain = open(module.params.get('cert_chain'), 'r').read()
     else:
-        key=cert=chain=None
+        key=cert=cert_chain=None
 
     orig_certs = [ctb['server_certificate_name'] for ctb in \
                                                     iam.get_all_server_certs().\
                                                     list_server_certificates_result.\
                                                     server_certificate_metadata_list]
+    # There's a tricky eventual consistency/race condition thing going on here
+    # Just because a certificate is returned by get_all_server_certs doesn't
+    # mean that the subsequent call to get_server_certificate below will
+    # actually return the certificate. It could be that an external entity has
+    # deleted the cert between the calls, or it could mean that the cert was
+    # recently added by an external entity and AWS is just being eventually
+    # consistent. So, is the "right" behavior to ignore certs that aren't found
+    # by get_server_certificate, or to retry until they are found?
+    # The former seems like the better option. If not ignored, it could cause
+    # problems later (e.g., len(orig_certs) != len(orig_bodies) can cause an
+    # array index error elsewhere in this module). If we wait, there's no
+    # guarantee we'll ever find it, so it could just cause a needless wait,
+    # especially when that missing cert isn't at all relevant to what the
+    # current invocation is trying to do.
     orig_bodies = []
+    # removing an object from a list while iterating over it causes problems
+    orig_certs_copy = list(orig_certs)
     for thing in orig_certs:
         try:
             orig_bodies.append(iam.get_server_certificate(thing).\
@@ -281,9 +297,12 @@ def main():
                                certificate_body)
         except boto.exception.BotoServerError, err:
             if err.status == 404 and err.code == 'NoSuchEntity':
+                orig_certs_copy.remove(thing)
                 continue
             else:
                 module.fail_json(msg=str(err))
+
+    orig_certs = orig_certs_copy
 
     if new_name == name:
         new_name = None
